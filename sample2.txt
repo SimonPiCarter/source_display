@@ -1,0 +1,2 @@
+JavaScript is fun.
+HTML and CSS are too.

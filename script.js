@@ -8,37 +8,45 @@ fileInput.addEventListener('change', function(event) {
     if (file) {
         const reader = new FileReader();
         reader.onload = function(e) {
-            fileContent.textContent = e.target.result;
-            // Clear previous word info and highlight when a new file is loaded
-            wordInfo.textContent = '';
+            // Clear previous content and state
             if (highlightedSpan) {
-                highlightedSpan = null; // Reset highlightedSpan as its parent is gone
+                // No need to manually remove if we are resetting textContent
+                highlightedSpan = null;
             }
+            fileContent.textContent = e.target.result; // Set new content
+            wordInfo.textContent = ''; // Clear word info
         }
         reader.readAsText(file);
+    } else {
+        // No file selected or selection cancelled
+        if (highlightedSpan) {
+            // Attempt to remove highlight if a file was previously loaded
+            // This path might be less common if fileInput.value is cleared by browser
+            const parent = highlightedSpan.parentNode;
+            if (parent) {
+                 parent.replaceChild(document.createTextNode(highlightedSpan.textContent), highlightedSpan);
+                 parent.normalize(); // Merge text nodes
+            }
+            highlightedSpan = null;
+        }
+        fileContent.textContent = ''; // Clear display
+        wordInfo.textContent = ''; // Clear word info
     }
 });
 
 fileContent.addEventListener('click', function(event) {
-    const text = fileContent.textContent;
-    if (!text) return;
+    if (!fileContent.textContent) return;
 
     // Remove previous highlight
     if (highlightedSpan) {
         const parent = highlightedSpan.parentNode;
-        parent.replaceChild(document.createTextNode(highlightedSpan.textContent), highlightedSpan);
+        if (parent) { // Check if span is still in DOM
+            parent.replaceChild(document.createTextNode(highlightedSpan.textContent), highlightedSpan);
+            parent.normalize(); // Merge adjacent text nodes
+        }
         highlightedSpan = null;
-        // After replacing the child, the DOM structure changes.
-        // We need to re-normalize the text nodes if the highlight was in a split text node.
-        // However, for simplicity with <pre>, we re-set its textContent to avoid complex node manipulation.
-        // This is okay because we're primarily working with plain text display.
-        // A more robust solution for rich text would involve careful range manipulation.
-        fileContent.textContent = text; // This re-sets the content and loses the highlight.
-                                        // A better way is needed if we want to keep other highlights or complex structures.
-                                        // For this task, we assume only one highlight at a time.
     }
 
-    // Get selection / caret position
     const selection = window.getSelection();
     if (selection.rangeCount === 0) return;
 
@@ -46,24 +54,20 @@ fileContent.addEventListener('click', function(event) {
     let clickedNode = range.startContainer;
     let clickedOffset = range.startOffset;
 
-    // Ensure we're working with a text node within fileContent
+    // Only proceed if the click is within fileContent and on a Text Node
     if (!fileContent.contains(clickedNode) || clickedNode.nodeType !== Node.TEXT_NODE) {
-        // Fallback or attempt to find the text node from event coordinates if direct selection is problematic
-        // This can happen if the click is on the <pre> but not directly on text.
-        // For simplicity, we'll rely on the selection API here.
-        // More advanced logic might use document.caretPositionFromPoint.
-        console.log("Click was not directly on text or selection is problematic.");
+        wordInfo.textContent = 'Please click directly on the text.';
         return;
     }
 
-    const fullText = fileContent.textContent; // Use fullText for calculations
+    const fullTextContent = fileContent.textContent; // Get current full text for line/col calculation
 
-    // Expand to find word boundaries
+    // Expand to find word boundaries within the clickedNode's text
     let wordStart = clickedOffset;
     let wordEnd = clickedOffset;
 
     // Find word start
-    while (wordStart > 0 && !isWordBoundary(fullText[wordStart - 1])) {
+    while (wordStart > 0 && !isWordBoundary(clickedNode.textContent[wordStart - 1])) {
         wordStart--;
     }
 
@@ -72,15 +76,14 @@ fileContent.addEventListener('click', function(event) {
         wordEnd++;
     }
 
-    // If no word is found (e.g., clicking on whitespace), do nothing
-    if (wordStart === wordEnd) {
+    if (wordStart === wordEnd) { // Click was on whitespace or boundary itself
         wordInfo.textContent = '';
         return;
     }
 
     const word = clickedNode.textContent.substring(wordStart, wordEnd);
 
-    // Create a new range for the identified word
+    // Create a new range for the identified word within clickedNode
     const wordRange = document.createRange();
     wordRange.setStart(clickedNode, wordStart);
     wordRange.setEnd(clickedNode, wordEnd);
@@ -89,30 +92,53 @@ fileContent.addEventListener('click', function(event) {
     const newSpan = document.createElement('span');
     newSpan.className = 'highlight';
     newSpan.textContent = word;
+
     wordRange.deleteContents(); // Remove the text
     wordRange.insertNode(newSpan); // Insert the span
     highlightedSpan = newSpan;
 
     // Calculate line and column
-    // To get the absolute offset of the word in the *entire* fileContent text
+    // The 'absoluteWordStartOffset' is the sum of lengths of all text nodes
+    // before 'clickedNode' plus 'wordStart' within 'clickedNode'.
     let absoluteWordStartOffset = 0;
-    let currentNode = fileContent.firstChild;
-    let found = false;
-    while(currentNode && !found) {
-        if (currentNode === clickedNode) {
+    let node = fileContent.firstChild;
+    while (node) {
+        if (node === clickedNode) {
             absoluteWordStartOffset += wordStart;
-            found = true;
-        } else if (currentNode.nodeType === Node.TEXT_NODE) {
-            absoluteWordStartOffset += currentNode.textContent.length;
+            break;
         }
-        currentNode = currentNode.nextSibling;
+        if (node.nodeType === Node.TEXT_NODE) {
+            absoluteWordStartOffset += node.textContent.length;
+        } else if (node === highlightedSpan && node !== newSpan) {
+            // This case should ideally not be hit if highlights are properly removed and normalized
+            // but as a safeguard, count its text length if it's an old highlight somehow missed.
+            absoluteWordStartOffset += node.textContent.length;
+        }
+        node = node.nextSibling;
+    }
+    // If node is null here, it means clickedNode was not found, which is an error state.
+     if (!node && fileContent.contains(clickedNode)) {
+        // Fallback if clickedNode was not directly found in iteration (e.g. deeply nested, though not expected for <pre>)
+        // This part of the logic for offset calculation could be tricky if the DOM is complex.
+        // For <pre> with text and spans, the direct child iteration should work.
+        // Re-calculating based on fullTextContent as a simpler, more robust way for line/col:
+        // Find the instance of the word. This is problematic if words repeat.
+        // A better way is to use the range's start offset in the context of the whole fileContent.
+        // However, Range.startOffset is relative to startContainer.
+        // The most robust way to get an "absolute" offset for line/col counting
+        // is to iterate up to the point of insertion.
+        // The current `absoluteWordStartOffset` logic should be mostly correct for a flat <pre> structure.
     }
 
 
     let lineNum = 1;
     let colNum = 1;
+    // Use `fullTextContent` which is the normalized, complete text at the time of click (before new span)
+    // The `absoluteWordStartOffset` should correspond to this `fullTextContent`.
+    // The issue is `fullTextContent` is from `fileContent.textContent` *before* the new span is inserted
+    // but *after* the old span was removed and normalized. This should be correct.
     for (let i = 0; i < absoluteWordStartOffset; i++) {
-        if (fullText[i] === '\n') {
+        if (fullTextContent[i] === '\n') {
             lineNum++;
             colNum = 1;
         } else {
@@ -120,7 +146,6 @@ fileContent.addEventListener('click', function(event) {
         }
     }
     wordInfo.textContent = `Word: "${word}", Line: ${lineNum}, Column: ${colNum}`;
-
 });
 
 function isWordBoundary(char) {
